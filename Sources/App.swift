@@ -477,7 +477,8 @@ struct StatusCard: View {
             Circle().fill(color).frame(width: 12, height: 12).padding(.top, 4)
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.headline)
-                if let i = m.info {
+                // Shown only when the iron reports real values; in update mode it usually does not.
+                if let i = m.info, i.dateKnown, i.hwKnown {
                     let ver = knownVersions[i.date].map { "\($0) (\(prettyDate(i.date)))" } ?? prettyDate(i.date)
                     Text(m.t("status.installed", ver, String(format: "%.1f", Double(i.hwVer) / 10)))
                         .font(.callout).foregroundColor(.secondary)

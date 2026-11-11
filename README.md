@@ -8,7 +8,7 @@ The official ALIENTEK updater (`ATK_T90.exe`) runs only on Windows. T90ABC Flash
 
 - Updates the firmware from the official ALIENTEK package (ZIP, folder or `.atk` file)
 - Changes the boot logo: English, Chinese or your own image
-- Shows the installed firmware version (for example 1.1.6)
+- Shows the version of each firmware in the package (for example 1.1.6)
 - Tells you when a new version of the app is available
 - Runs on Apple Silicon (M1 and newer) and Intel Macs with macOS 13 Ventura or later
 - Interface in English, Russian, Ukrainian, Spanish, Portuguese, German and Chinese

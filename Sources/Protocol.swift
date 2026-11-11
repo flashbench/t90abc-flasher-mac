@@ -66,6 +66,10 @@ struct DevInfo {
     var runFlag: UInt8
     var sn: String
     var date: String
+    /// In update mode the bootloader often reports empty fields (0xFF), so the
+    /// installed version is unknown. Only real calendar dates count.
+    var dateKnown: Bool
+    var hwKnown: Bool { hwVer != 0xFF && hwVer != 0 }
     var inBootloader: Bool { runFlag >= 0xB0 }
 
     init?(_ d: [UInt8]) {
@@ -73,6 +77,7 @@ struct DevInfo {
         devType = UInt16(d[0]) | UInt16(d[1]) << 8
         hwVer = d[2]; appVer = d[3]; runFlag = d[5]
         sn = d[6..<18].map { String(format: "%02X", $0) }.joined()
+        dateKnown = (20...99).contains(d[18]) && (1...12).contains(d[19]) && (1...31).contains(d[20])
         date = String(format: "20%02d-%02d-%02d", d[18], d[19], d[20])
     }
 }
