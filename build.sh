@@ -4,7 +4,7 @@
 set -e
 
 # ---- Edit these before publishing ----
-VERSION="1.0.0"   # GitHub release tag must match, e.g. v1.0.0
+VERSION="1.0.1"   # GitHub release tag must match, e.g. v1.0.0
 GITHUB_REPO="flashbench/t90abc-flasher-mac"   # used for update checks
 PROJECT_URL="https://github.com/$GITHUB_REPO"
 SUPPORT_URL="https://github.com/$GITHUB_REPO#support"
@@ -63,9 +63,10 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </dict></plist>
 EOF
 
-# Ad-hoc signature (needed to run on Apple Silicon). Replace "-" with your
-# "Developer ID Application: …" identity once you have an Apple Developer account.
-codesign --force --deep --sign - "$APP"
+# Ad-hoc signature with the hardened runtime (needed to run on Apple Silicon).
+# With an Apple Developer account, sign with your "Developer ID Application: …"
+# identity instead of "-", drop --timestamp=none, then notarize the ZIP.
+codesign --force --options runtime --timestamp=none --sign - "$APP"
 
 rm -f "$DIST/T90ABC-Flasher-macOS.zip"
 ditto -c -k --keepParent "$APP" "$DIST/T90ABC-Flasher-macOS.zip"

@@ -1,10 +1,11 @@
-// Протокол обновления ALIENTEK T90 по USB-HID (как в официальной утилите ATK_T90.exe).
+// USB HID update protocol of the ALIENTEK T90 bootloader
+// (the same protocol the official Windows updater ATK_T90.exe uses).
 //
-// Кадр:   [адрес][команда][номер][длина][данные…][контрольная сумма]
-// Адрес:  0xAF — от компьютера, 0xDF — ответ паяльника.
-// Сумма:  (256 - сумма всех байтов кадра % 256) & 0xFF.
-// Файл .atk: блоки «заголовок 13 байт + данные»; данные уже зашифрованы,
-// паяльник расшифровывает их сам.
+// Frame:    [address][command][sequence][length][data…][checksum]
+// Address:  0xAF from the computer, 0xDF in replies from the iron.
+// Checksum: (256 - sum of all frame bytes % 256) & 0xFF.
+// .atk file: blocks of "13-byte header + data". The data is already encrypted;
+// the iron decrypts it itself, so it is sent unchanged.
 
 import AppKit
 import IOKit.hid
@@ -22,7 +23,11 @@ enum Proto {
     static let startSend: UInt8 = 0x12
     static let sendData: UInt8 = 0x13
     static let sendEnd: UInt8 = 0x14
-    static let finish: UInt8 = 0x15  // с байтом 0xA0 — завершить и запустить прошивку
+    static let finish: UInt8 = 0x15  // with byte 0xA0: finish and start the new firmware
+
+    /// Block types the official updater treats as application data (firmware 0xA0, logo 0xA1).
+    /// Anything else could target the bootloader itself, so it is never sent.
+    static let allowedFileTypes: ClosedRange<UInt8> = 0xA0...0xAF
 
     static func checksum(_ bytes: [UInt8]) -> UInt8 {
         let sum = bytes.reduce(0) { $0 + Int($1) }
@@ -35,18 +40,20 @@ enum Proto {
         return body
     }
 
-    /// Данные ответа или nil, если это не ответ паяльника.
+    /// Reply payload, or nil if this is not a valid reply from the iron.
     static func parse(_ buf: [UInt8]) -> [UInt8]? {
         var b = buf
-        if b.count > 1 && b[0] != addrDev && b[1] == addrDev { b.removeFirst() }
+        if b.count > 1 && b[0] != addrDev && b[1] == addrDev { b.removeFirst() }  // report ID left in front
         guard b.count >= 6, b[0] == addrDev else { return nil }
         let n = Int(b[3])
         guard b.count >= n + 6 else { return nil }
+        // The reply checksum is not verified, exactly like the official updater:
+        // its format in replies is not confirmed, and checking it could reject valid replies.
         return Array(b[4..<(4 + n)])
     }
 }
 
-/// Ошибка с ключом перевода (см. Strings.swift).
+/// Error carrying a translation key (see Strings.swift).
 struct FlashError: Error {
     let key: String
     var args: [CVarArg] = []
@@ -71,7 +78,7 @@ struct DevInfo {
 }
 
 struct FwBlock {
-    var header: [UInt8]   // 13 байт: dev_type, hw, app, тип файла, размер пакета, размер, год, месяц, день
+    var header: [UInt8]   // 13 bytes: dev type, hw, app, file type, chunk size, data size, year, month, day
     var data: [UInt8]
     var devType: UInt16 { UInt16(header[0]) | UInt16(header[1]) << 8 }
     var fileType: UInt8 { header[4] }
@@ -80,15 +87,22 @@ struct FwBlock {
     var date: String { String(format: "20%02d-%02d-%02d", header[10], header[11], header[12]) }
 }
 
+/// Largest .atk file accepted (official files are about 100 KB).
+let maxATKSize = 4 * 1024 * 1024
+
 func parseATK(_ raw: [UInt8]) throws -> [FwBlock] {
+    guard raw.count <= maxATKSize else { throw FlashError(key: "err.badFile") }
     var blocks: [FwBlock] = []
     var pos = 0
     while pos < raw.count {
-        guard pos + 13 <= raw.count else { throw FlashError(key: "err.badFile") }
+        guard pos + 13 <= raw.count, blocks.count < 8 else { throw FlashError(key: "err.badFile") }
         let hdr = Array(raw[pos..<pos + 13])
         let size = Int(hdr[6]) | Int(hdr[7]) << 8 | Int(hdr[8]) << 16 | Int(hdr[9]) << 24
         pos += 13
-        guard hdr[5] > 0, hdr[5] <= 58, pos + size <= raw.count else { throw FlashError(key: "err.badFile") }
+        // Chunk must fit one 64-byte HID report together with the 5 framing bytes.
+        guard hdr[5] > 0, Int(hdr[5]) <= Proto.reportSize - 6,
+              Proto.allowedFileTypes.contains(hdr[4]),
+              size > 0, size <= raw.count - pos else { throw FlashError(key: "err.badFile") }
         blocks.append(FwBlock(header: hdr, data: Array(raw[pos..<pos + size])))
         pos += size
     }
@@ -96,8 +110,8 @@ func parseATK(_ raw: [UInt8]) throws -> [FwBlock] {
     return blocks
 }
 
-/// Известные версии по дате сборки (из списка изменений ALIENTEK).
-/// Так же версия показывается в меню паяльника (V:1.1.6).
+/// Firmware versions by build date (from the ALIENTEK change log),
+/// written the way the iron shows them in its menu (V:1.1.6).
 let knownVersions: [String: String] = [
     "2026-08-17": "1.1.6", "2026-05-12": "1.1.5", "2026-03-04": "1.1.4",
     "2026-01-08": "1.1.3", "2025-12-05": "1.1.1", "2025-11-28": "1.1.0",
@@ -111,12 +125,12 @@ func prettyDate(_ iso: String) -> String {
     return p.count == 3 ? "\(p[2]).\(p[1]).\(p[0])" : iso
 }
 
-// MARK: - Логотип
+// MARK: - Boot logo
 
 enum Logo {
     static let w = 160, h = 40
 
-    /// Вписывает картинку в 160x40 на чёрном фоне. Возвращает превью и пиксели RGB565 (little-endian).
+    /// Fits an image into 160×40 on black. Returns a preview and RGB565 little-endian pixels.
     static func render(_ image: NSImage) -> (NSImage, [UInt8])? {
         guard let src = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
@@ -149,20 +163,32 @@ enum Logo {
         let hdr: [UInt8] = [UInt8(Proto.devType & 0xFF), UInt8(Proto.devType >> 8), 0, 0, 0xA1, 40,
                             UInt8(size & 0xFF), UInt8((size >> 8) & 0xFF),
                             UInt8((size >> 16) & 0xFF), UInt8(size >> 24), 0, 0, 0]
-        // Шифр ATK с нулевым ключом = инверсия каждого байта (так же зашифрованы файлы .atk).
+        // The ATK cipher with an all-zero key reduces to inverting every byte
+        // (the firmware data in .atk files is encoded the same way).
         return FwBlock(header: hdr, data: payload.map { ~$0 })
     }
 }
 
-// MARK: - USB-HID
+// MARK: - USB HID
 
 final class HIDLink {
     private let manager: IOHIDManager
-    private(set) var device: IOHIDDevice?
+    private var _device: IOHIDDevice?
+    private let deviceLock = NSLock()
     private let inBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: 256)
     private let cond = NSCondition()
     private var reports: [[UInt8]] = []
     var onChange: ((Bool) -> Void)?
+
+    /// Thread-safe: set on the main thread by IOKit callbacks, read by the flashing thread.
+    var device: IOHIDDevice? {
+        deviceLock.lock(); defer { deviceLock.unlock() }
+        return _device
+    }
+
+    private func setDevice(_ d: IOHIDDevice?) {
+        deviceLock.lock(); _device = d; deviceLock.unlock()
+    }
 
     init() {
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -181,25 +207,30 @@ final class HIDLink {
 
     private func attach(_ dev: IOHIDDevice) {
         guard IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else { return }
-        device = dev
+        setDevice(dev)
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         IOHIDDeviceRegisterInputReportCallback(dev, inBuf, 256, { ctx, _, _, _, _, report, len in
             Unmanaged<HIDLink>.fromOpaque(ctx!).takeUnretainedValue()
-                .received(Array(UnsafeBufferPointer(start: report, count: len)))
+                .received(Array(UnsafeBufferPointer(start: report, count: min(len, 256))))
         }, ctx)
         onChange?(true)
     }
 
     private func detach(_ dev: IOHIDDevice) {
-        if device == dev { device = nil; onChange?(false) }
+        if device == dev { setDevice(nil); onChange?(false) }
     }
 
     private func received(_ r: [UInt8]) {
-        cond.lock(); reports.append(r); cond.signal(); cond.unlock()
+        cond.lock()
+        reports.append(r)
+        if reports.count > 64 { reports.removeFirst(reports.count - 64) }  // never grow without bound
+        cond.signal()
+        cond.unlock()
     }
 
     private func write(_ frame: [UInt8]) throws {
         guard let dev = device else { throw FlashError(key: "err.disconnected") }
+        guard frame.count <= Proto.reportSize else { throw FlashError(key: "err.badFile") }
         var rep = frame + [UInt8](repeating: 0, count: Proto.reportSize - frame.count)
         let res = IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0, &rep, rep.count)
         if res != kIOReturnSuccess { throw FlashError(key: "err.usb", args: [Int(res)]) }
@@ -210,7 +241,7 @@ final class HIDLink {
         try write(Proto.frame(cmd, seq, data))
     }
 
-    /// Отправляет команду и ждёт ответ. nil — таймаут.
+    /// Sends a command and waits for the reply. nil means timeout.
     func request(_ cmd: UInt8, seq: UInt8 = 0, data: [UInt8] = [], timeout: TimeInterval = 1) throws -> [UInt8]? {
         try send(cmd, seq: seq, data: data)
         let deadline = Date().addingTimeInterval(timeout)
@@ -233,12 +264,16 @@ final class HIDLink {
         return DevInfo(r)
     }
 
-    /// Полная запись блоков. progress(0…1), stage(ключ перевода), log(строка).
+    /// Writes all blocks. progress(0…1), stage(translation key), log(line).
     func flash(_ blocks: [FwBlock], progress: (Double) -> Void, stage: (String) -> Void, log: (String) -> Void) throws {
+        guard !blocks.isEmpty else { throw FlashError(key: "err.noFw") }
         guard let info = try devInfo() else { throw FlashError(key: "err.noResponse") }
         log(String(format: "Device 0x%04X, firmware %@, mode 0x%02X", info.devType, info.date, info.runFlag))
         guard info.inBootloader else { throw FlashError(key: "err.notBoot") }
-        guard blocks[0].devType == info.devType else { throw FlashError(key: "err.wrongDevice") }
+        // Every block must be meant for this device and be application data, never a bootloader image.
+        guard blocks.allSatisfy({ $0.devType == info.devType && Proto.allowedFileTypes.contains($0.fileType) }) else {
+            throw FlashError(key: "err.wrongDevice")
+        }
 
         let total = blocks.reduce(0) { $0 + $1.data.count }
         var done = 0

@@ -1,4 +1,4 @@
-// Переводы интерфейса. Чтобы добавить язык: новый case в Lang и словарь ниже.
+// UI translations. To add a language: a new case in Lang and a dictionary below.
 
 import Foundation
 

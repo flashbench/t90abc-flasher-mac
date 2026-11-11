@@ -1,10 +1,10 @@
-// T90ABC Flasher — интерфейс и логика приложения.
+// T90ABC Flasher — app logic and user interface.
 
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-// Ссылки задаются в build.sh и попадают в Info.plist.
+// Links are set in build.sh and stored in Info.plist.
 enum Links {
     static func info(_ key: String) -> URL? {
         (Bundle.main.object(forInfoDictionaryKey: key) as? String).flatMap(URL.init(string:))
@@ -13,15 +13,22 @@ enum Links {
     static var project: URL? { info("T90ProjectURL") }
     static var support: URL? { info("T90SupportURL") }
     static var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }
-    /// "ник/репозиторий" на GitHub; пусто или заглушка — проверка обновлений выключена.
+    /// "owner/repo" on GitHub; missing or placeholder disables update checks.
     static var repo: String? {
         guard let r = Bundle.main.object(forInfoDictionaryKey: "T90GitHubRepo") as? String,
-              r.contains("/"), !r.contains("YOUR_") else { return nil }
+              !r.contains("YOUR_"),
+              r.range(of: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", options: .regularExpression) != nil else { return nil }
         return r
+    }
+
+    /// Only https links to GitHub are opened from update information.
+    static func isTrustedDownload(_ url: URL) -> Bool {
+        guard url.scheme == "https", let host = url.host?.lowercased() else { return false }
+        return host == "github.com" || host.hasSuffix(".github.com") || host.hasSuffix(".githubusercontent.com")
     }
 }
 
-// MARK: - Проверка обновлений (GitHub Releases)
+// MARK: - Update check (GitHub Releases)
 
 enum Updater {
     struct Release { let version: String; let notes: String; let url: URL }
@@ -39,7 +46,7 @@ enum Updater {
         return false
     }
 
-    /// Последний релиз. Запрос только к api.github.com, никаких данных о пользователе не отправляется.
+    /// Latest release. Only api.github.com is contacted; no user data is sent.
     static func fetchLatest(repo: String, done: @escaping (Release?) -> Void) {
         guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { done(nil); return }
         var req = URLRequest(url: url, timeoutInterval: 15)
@@ -50,10 +57,13 @@ enum Updater {
                   let tag = json["tag_name"] as? String,
                   let page = (json["html_url"] as? String).flatMap(URL.init(string:)) else { done(nil); return }
             let assets = json["assets"] as? [[String: Any]] ?? []
-            let zip = assets.first { ($0["name"] as? String)?.hasSuffix(".zip") == true }?["browser_download_url"] as? String
+            let zip = (assets.first { ($0["name"] as? String)?.hasSuffix(".zip") == true }?["browser_download_url"] as? String)
+                .flatMap(URL.init(string:))
             let notes = (json["body"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let target = zip.flatMap { Links.isTrustedDownload($0) ? $0 : nil } ?? page
+            guard Links.isTrustedDownload(target) else { done(nil); return }
             done(Release(version: tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV")),
-                         notes: notes, url: zip.flatMap(URL.init(string:)) ?? page))
+                         notes: notes, url: target))
         }.resume()
     }
 }
@@ -74,36 +84,40 @@ struct LogoOption: Identifiable, Equatable {
 }
 
 final class AppModel: ObservableObject {
-    // Устройство
+    // Device
     @Published var connected = false
     @Published var info: DevInfo?
-    // Прошивка
+    // Firmware
     @Published var packageName: String?
     @Published var fwOptions: [FwOption] = []
     @Published var selectedFw: String = ""
-    // Логотип
+    // Logo
     @Published var logoOptions: [LogoOption] = [LogoOption(id: "custom", kind: .custom, url: nil)]
     @Published var selectedLogo: String = "custom" { didSet { logoChanged(from: oldValue) } }
     @Published var customLogoURL: URL?
     @Published var logoPreview: NSImage?
     @Published var withLogo = true
-    // Процесс
+    // Progress
     @Published var busy = false
     @Published var progress: Double = 0
     @Published var stageKey = ""
     @Published var log: [String] = []
-    // Окна
+    // Dialogs
     @Published var confirm: (fw: Bool, logo: Bool)?
     @Published var errorText: String?
     @Published var showDone = false
     @Published var showAbout = false
-    // Язык ("" — как в системе)
+    // Language ("" = system)
     @Published var langSetting: String = UserDefaults.standard.string(forKey: "lang") ?? "" {
         didSet { UserDefaults.standard.set(langSetting, forKey: "lang") }
     }
 
     private var logoPixels: [UInt8]?
-    private var tempDirs: [URL] = []
+    private var activity: NSObjectProtocol?
+
+    let maxZipSize = 100 * 1024 * 1024
+    let maxUnzippedSize = 300 * 1024 * 1024
+    let maxImageSize = 20 * 1024 * 1024
     let link = HIDLink()
 
     var lang: Lang {
@@ -125,18 +139,31 @@ final class AppModel: ObservableObject {
             self.info = nil
             if on { self.refreshInfo() }
         }
+        cleanupTemp()
         if let last = UserDefaults.standard.string(forKey: "lastPackage"),
            FileManager.default.fileExists(atPath: last) {
             loadPackage(URL(fileURLWithPath: last), silent: true)
         }
     }
 
-    deinit { tempDirs.forEach { try? FileManager.default.removeItem(at: $0) } }
+    static let tempPrefix = "t90pkg-"
+
+    /// Removes the folders this app unpacked ZIPs into (also leftovers from earlier runs).
+    func cleanupTemp(keep: URL? = nil) {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+        let items = (try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)) ?? []
+        // Compare by name: the same folder may appear as /var/… or /private/var/….
+        for u in items where u.lastPathComponent.hasPrefix(AppModel.tempPrefix)
+                          && u.lastPathComponent != keep?.lastPathComponent {
+            try? fm.removeItem(at: u)
+        }
+    }
 
     var currentFw: FwOption? { fwOptions.first { $0.id == selectedFw } }
     var ready: Bool { connected && (info?.inBootloader ?? false) && !busy }
 
-    // MARK: Архив прошивки
+    // MARK: Firmware package
 
     func choosePackage() {
         let p = NSOpenPanel()
@@ -161,13 +188,17 @@ final class AppModel: ObservableObject {
         let fm = FileManager.default
         var root = url
         if url.pathExtension.lowercased() == "zip" {
-            let tmp = fm.temporaryDirectory.appendingPathComponent("t90pkg-\(UUID().uuidString)")
+            // Refuse oversized archives (official packages are a few MB) and ZIP bombs.
+            guard fileSize(url) <= maxZipSize, unzippedSize(url).map({ $0 <= maxUnzippedSize }) == true else {
+                if !silent { errorText = t("err.badFile") }
+                return
+            }
+            let tmp = fm.temporaryDirectory.appendingPathComponent(AppModel.tempPrefix + UUID().uuidString)
             try? fm.createDirectory(at: tmp, withIntermediateDirectories: true)
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
             p.arguments = ["-x", "-k", url.path, tmp.path]
             try? p.run(); p.waitUntilExit()
-            tempDirs.append(tmp)
             root = tmp
         }
 
@@ -178,7 +209,7 @@ final class AppModel: ObservableObject {
             scan(root, atks: &atks, images: &images)
         } else if root.pathExtension.lowercased() == "atk" {
             atks = [root]
-            // Логотипы рядом с файлом: папка logo в той же или родительской папке.
+            // Logos next to the file: a "logo" folder in the same or the parent folder.
             let dir = root.deletingLastPathComponent()
             for d in [dir.appendingPathComponent("logo"), dir.deletingLastPathComponent().appendingPathComponent("logo")] {
                 scan(d, atks: &atks, images: &images, atkToo: false)
@@ -186,18 +217,19 @@ final class AppModel: ObservableObject {
         }
 
         let fws: [FwOption] = atks.compactMap { u in
-            guard let raw = try? Data(contentsOf: u), let b = try? parseATK([UInt8](raw)),
+            guard fileSize(u) <= maxATKSize,
+                  let raw = try? Data(contentsOf: u), let b = try? parseATK([UInt8](raw)),
                   b[0].devType == Proto.devType else { return nil }
             return FwOption(url: u, blocks: b)
         }.sorted { ($0.isFix ? 0 : 1, $0.date) > ($1.isFix ? 0 : 1, $1.date) }
 
         var logos: [LogoOption] = images.compactMap { u in
-            guard let rep = NSImageRep(contentsOf: u), rep.pixelsWide == Logo.w, rep.pixelsHigh == Logo.h else { return nil }
+            guard fileSize(u) <= maxImageSize, let rep = NSImageRep(contentsOf: u), rep.pixelsWide == Logo.w, rep.pixelsHigh == Logo.h else { return nil }
             let name = u.deletingPathExtension().lastPathComponent
             let kind: LogoOption.Kind
             if name.lowercased().contains("alientek") { kind = .english }
-            // Китайское имя (正点原子…). В ZIP оно часто в кодировке GBK и распаковывается
-            // «кракозябрами», поэтому любое не-ASCII имя считаем китайским логотипом.
+            // Chinese name (正点原子…). Inside ZIPs it is often GBK-encoded and unpacks as
+            // garbled text, so any non-ASCII name is treated as the Chinese logo.
             else if name.unicodeScalars.contains(where: { !$0.isASCII }) { kind = .chinese }
             else { kind = .file }
             return LogoOption(id: u.path, kind: kind, url: u)
@@ -205,9 +237,11 @@ final class AppModel: ObservableObject {
         logos.sort { order($0.kind) < order($1.kind) }
 
         if fws.isEmpty && logos.isEmpty {
+            if root != url { try? fm.removeItem(at: root) }
             if !silent { errorText = t("err.noAtk") }
             return
         }
+        cleanupTemp(keep: root != url ? root : nil)  // drop folders of previously unpacked ZIPs
         packageName = url.lastPathComponent
         fwOptions = fws
         selectedFw = fws.first?.id ?? ""
@@ -221,14 +255,37 @@ final class AppModel: ObservableObject {
         switch k { case .english: return 0; case .chinese: return 1; case .file: return 2; case .custom: return 3 }
     }
 
+    private func fileSize(_ u: URL) -> Int {
+        (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max
+    }
+
+    /// Total unpacked size of a ZIP, read from its directory with /usr/bin/zipinfo.
+    private func unzippedSize(_ zip: URL) -> Int? {
+        let p = Process()
+        let out = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/zipinfo")
+        p.arguments = ["-t", zip.path]
+        p.standardOutput = out
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        // "12 files, 4325721 bytes uncompressed, …"
+        guard let line = String(data: data, encoding: .utf8),
+              let r = line.range(of: #"(\d+) bytes uncompressed"#, options: .regularExpression) else { return nil }
+        return Int(line[r].split(separator: " ")[0])
+    }
+
     private func scan(_ dir: URL, atks: inout [URL], images: inout [URL], atkToo: Bool = true) {
-        guard let en = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil,
+        guard let en = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.isSymbolicLinkKey],
                                                       options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return }
         var count = 0
         for case let u as URL in en {
             count += 1
             if count > 3000 { break }
             if u.path.contains("__MACOSX") { continue }
+            // Never follow links: a crafted archive could point them at other files on the Mac.
+            if (try? u.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { continue }
             switch u.pathExtension.lowercased() {
             case "atk" where atkToo: atks.append(u)
             case "jpg", "jpeg", "png", "bmp": images.append(u)
@@ -252,10 +309,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Логотип
+    // MARK: Logo
 
     private func logoChanged(from old: String) {
-        // Окно выбора открываем только когда пользователь сам переключился на «Своя картинка».
+        // Open the file picker only when the user switched to "Custom image" themselves.
         if !programmatic && selectedLogo == "custom" && old != "custom" && customLogoURL == nil {
             DispatchQueue.main.async {
                 self.chooseCustomLogo()
@@ -282,13 +339,14 @@ final class AppModel: ObservableObject {
 
     func updateLogo() {
         let url = selectedLogo == "custom" ? customLogoURL : logoOptions.first { $0.id == selectedLogo }?.url
-        guard let u = url, let img = NSImage(contentsOf: u), let (prev, px) = Logo.render(img) else {
+        guard let u = url, fileSize(u) <= maxImageSize,
+              let img = NSImage(contentsOf: u), let (prev, px) = Logo.render(img) else {
             logoPreview = nil; logoPixels = nil; return
         }
         logoPreview = prev; logoPixels = px
     }
 
-    // MARK: Обновления
+    // MARK: Updates
 
     func checkForUpdates(manual: Bool) {
         guard let repo = Links.repo else {
@@ -332,7 +390,7 @@ final class AppModel: ObservableObject {
         a.runModal()
     }
 
-    /// Окно при выходе. Возвращает false, если выходить нельзя (идёт прошивка).
+    /// Dialog on quit. Returns false if quitting is not allowed (update in progress).
     func confirmQuit() -> Bool {
         if busy {
             let a = NSAlert()
@@ -353,7 +411,7 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    // MARK: Устройство
+    // MARK: Device
 
     func refreshInfo() {
         DispatchQueue.global().async {
@@ -374,6 +432,12 @@ final class AppModel: ObservableObject {
             blocks.append(Logo.block(pixels: px))
         }
         busy = true; progress = 0; log.removeAll(); stageKey = "progress.preparing"
+        // Keep the Mac awake while writing: sleeping mid-update would interrupt it.
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled], reason: "Updating the soldering iron")
+        let endActivity = { [weak self] in
+            if let a = self?.activity { ProcessInfo.processInfo.endActivity(a); self?.activity = nil }
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try self.link.flash(blocks,
@@ -381,6 +445,7 @@ final class AppModel: ObservableObject {
                     stage: { k in DispatchQueue.main.async { self.stageKey = k } },
                     log: { s in DispatchQueue.main.async { self.log.append(s) } })
                 DispatchQueue.main.async {
+                    endActivity()
                     self.busy = false; self.progress = 1; self.stageKey = ""
                     self.showDone = true
                 }
@@ -392,6 +457,7 @@ final class AppModel: ObservableObject {
                     text = error.localizedDescription
                 }
                 DispatchQueue.main.async {
+                    endActivity()
                     self.log.append("Error: \(text)")
                     self.busy = false; self.stageKey = ""
                     self.errorText = text
@@ -401,7 +467,7 @@ final class AppModel: ObservableObject {
     }
 }
 
-// MARK: - Интерфейс
+// MARK: - User interface
 
 struct StatusCard: View {
     @ObservedObject var m: AppModel
@@ -626,7 +692,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // При выключении/перезагрузке Mac окно не показываем, чтобы не мешать.
+        // Do not block logout, restart or shutdown with a dialog.
         if let ev = NSAppleEventManager.shared().currentAppleEvent,
            let why = ev.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue,
            [kAELogOut, kAEReallyLogOut, kAERestart, kAEShutDown,
@@ -635,6 +701,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard let m = AppModel.current else { return .terminateNow }
         return m.confirmQuit() ? .terminateNow : .terminateCancel
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AppModel.current?.cleanupTemp()
     }
 }
 

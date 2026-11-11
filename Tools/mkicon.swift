@@ -1,4 +1,4 @@
-// Рисует иконку приложения 1024x1024: оранжевый квадрат с пламенем и надписью T90.
+// Draws the 1024×1024 app icon: dark rounded square with a flame and "T90".
 import AppKit
 
 let size = 1024
