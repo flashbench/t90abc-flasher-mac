@@ -79,7 +79,16 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Support
 
-T90ABC Flasher is free. If it helped you, please ⭐ star this repository and share it with other T90 owners.
+T90ABC Flasher is free. If it saved you from hunting for a Windows PC, you can support further development (more soldering irons and devices) with a small donation in **USDT**. Starring ⭐ the repository and sharing it with other T90 owners helps too.
+
+| USDT · Tron (TRC20) — lowest fees | USDT · Ethereum (ERC20) |
+|:---:|:---:|
+| <img src="docs/usdt-trc20.png" width="220" alt="USDT TRC20 QR code"> | <img src="docs/usdt-erc20.png" width="220" alt="USDT ERC20 QR code"> |
+| `TFwXNcoyRPULjHUsK6NL9wmJGAYZmWV2kY` | `0x1d1db5913f6406dbedf0b2c9c5f0f7a7f2bc06cf` |
+
+> **Send only USDT, and only on the network shown above the address.** Other coins, or USDT sent over a different network, cannot be recovered.
+
+Thank you! ❤️
 
 ## Build from source
 
