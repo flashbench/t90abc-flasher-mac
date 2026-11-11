@@ -48,7 +48,7 @@ After this the app opens normally. Each new version needs to be allowed once aga
 
 1. Download the official firmware package from the [ALIENTEK download page](https://en.alientek.com/download/p-0-10.html). Look for **T90ABC Smart Soldering Iron**: one package covers the T90A, T90B and T90C.
 2. Open T90ABC Flasher and click **Choose…**, or drag the downloaded ZIP into the window.
-3. Turn the iron **off**, press and hold **button B** (the one closest to the screen) and, while holding it, connect the USB-C cable to your Mac. The status dot turns green: *Ready to update*.
+3. Turn the iron **off**. Press and hold **button B** (the one closest to the screen) and, **while holding it**, connect the iron to your Mac with a USB-C **data** cable. Release the button when the app shows **Ready to update** (green dot).
 4. Click **Update firmware**, or **Install logo only** to change just the boot picture.
 5. Wait for **Done**, unplug the cable and turn the iron on.
 
