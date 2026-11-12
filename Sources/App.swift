@@ -390,25 +390,17 @@ final class AppModel: ObservableObject {
         a.runModal()
     }
 
-    /// Dialog on quit. Returns false if quitting is not allowed (update in progress).
+    /// Called on quit. Quitting is blocked only while an update is running;
+    /// otherwise the app closes right away (the donation link lives in the "Done" dialog and About).
     func confirmQuit() -> Bool {
-        if busy {
-            let a = NSAlert()
-            a.alertStyle = .critical
-            a.messageText = t("quit.busyTitle")
-            a.informativeText = t("quit.busyMsg")
-            a.addButton(withTitle: t("ok"))
-            a.runModal()
-            return false
-        }
-        guard let support = Links.support else { return true }
+        guard busy else { return true }
         let a = NSAlert()
-        a.messageText = t("quit.title")
-        a.informativeText = t("quit.msg")
-        a.addButton(withTitle: t("quit.donate"))
-        a.addButton(withTitle: t("quit.later"))
-        if a.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(support) }
-        return true
+        a.alertStyle = .critical
+        a.messageText = t("quit.busyTitle")
+        a.informativeText = t("quit.busyMsg")
+        a.addButton(withTitle: t("ok"))
+        a.runModal()
+        return false
     }
 
     // MARK: Device

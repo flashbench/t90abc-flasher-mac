@@ -4,7 +4,7 @@
 set -e
 
 # ---- Edit these before publishing ----
-VERSION="1.0.2"   # GitHub release tag must match, e.g. v1.0.0
+VERSION="1.0.3"   # GitHub release tag must match, e.g. v1.0.0
 GITHUB_REPO="flashbench/t90abc-flasher-mac"   # used for update checks
 PROJECT_URL="https://github.com/$GITHUB_REPO"
 SUPPORT_URL="https://github.com/$GITHUB_REPO#support"
